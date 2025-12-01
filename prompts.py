@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List
+from datetime import datetime
 
 
 class BasePrompt(ABC):
@@ -39,6 +40,7 @@ class SearchQueryGenerationPrompt(BasePrompt):
     
     def get_system_prompt(self) -> str:
         """Get the system prompt for generating search queries."""
+        current_year = datetime.now().year
         return f"""You are a research assistant. Given a user's query, generate {self.num_searches} diverse and specific search queries that will help gather comprehensive information to answer the question.
 
 IMPORTANT: For factual questions (dates, stats, historical seasons, etc.), you MUST generate search queries to find this information. Do NOT rely on memory - always search for factual data.
@@ -49,6 +51,8 @@ CRITICAL INSTRUCTIONS:
 - Produce {self.num_searches} distinct search queries that explore different angles of the topic
 - Do NOT generate paraphrases - each query should target a different aspect or sub-question
 - Each query should be unique and explore a different dimension of the topic
+- Always generate time-specific queries using the current year ({current_year})
+- Do NOT use {current_year - 2} or {current_year - 1} unless the question is explicitly historical
 
 Generate queries that:
 - Cover different aspects of the topic (not just rewordings of the same question)
@@ -75,8 +79,6 @@ Return ONLY a JSON object with this example structure:
             User prompt for search query generation
         """
         return f"User query: {query}\n\nGenerate {self.num_searches} search queries."
-
-
 class RefineSearchesPrompt(BasePrompt):
     """Prompt for refining searches based on initial results."""
     
@@ -112,7 +114,6 @@ Rules:
 More concrete rules:
 - If you can already write a correct, well-supported answer to the original question, set "should_continue" to false,
   even if there are additional interesting details you could still look up.
-- Do NOT treat individual game scores, player trivia, or side stories as required if the original question didn’t ask for them.
 
 Example when more research is needed:
 {
@@ -283,3 +284,53 @@ Please check your Tavily API key in the .env file and ensure it is valid.
 
 ## Sources Section
 No sources available - search functionality did not return any results."""
+
+# ============================================================================
+# Evaluation Prompts
+# ============================================================================
+class JudgePrompt(BasePrompt):
+    """Prompt for LLM judge evaluation of agent reports."""
+    
+    def get_system_prompt(self) -> str:
+        """Get the system prompt for the judge."""
+        return """You are an expert evaluator assessing the quality of a research report.
+
+Always respond with valid JSON only. Do not include any text outside the JSON object."""
+
+    def get_user_prompt(self, prompt: str, agent_report: str, gold_response: str) -> str:
+        """Get the user prompt for judge evaluation.
+        
+        Args:
+            prompt: Original user query
+            agent_report: Agent's generated report
+            gold_response: Expected/gold standard response
+            
+        Returns:
+            Formatted prompt for the judge
+        """
+        return f"""You are an expert evaluator assessing the quality of a research report.
+
+Original Query: {prompt}
+
+Gold Standard Response:
+{gold_response}
+
+Agent's Generated Report:
+{agent_report}
+
+Evaluate the agent's report on the following criteria:
+1. **Accuracy**: Does the report contain accurate information that aligns with the gold standard?
+2. **Completeness**: Does the report cover the key points from the gold standard?
+3. **Relevance**: Is the information directly relevant to the original query?
+4. **Citation Quality**: Are sources properly cited and relevant?
+
+Provide your evaluation as a JSON object with this structure:
+{{
+    "score": <0-100 integer>,
+    "accuracy": <0-100 integer>,
+    "completeness": <0-100 integer>,
+    "relevance": <0-100 integer>,
+    "citation_quality": <0-100 integer>,
+    "reasoning": "<brief explanation of your scores>"
+}}"""
+

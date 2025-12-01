@@ -11,25 +11,26 @@ class AgentConfig(BaseSettings):
     temperature: float = 0.2
 
     # Embedding for dedupe
-    embedding_model: str = "text-embedding-3-small"
+    embedding_model: str = "text-embedding-ada-002"
     query_similarity_threshold: float = 0.95
 
     # --- Search settings ---
     num_searches: int = 5
     max_results_per_search: int = 10
     num_refinement_iterations: int = 3
-    search_time_range: Optional[str] = "year"
 
     # --- Report settings ---
-    max_report_length: int = 2000
+    max_report_length_words: int = 2000  # Maximum approximate word count for the generated report
+    # Maximum number of search results to include in report
+    max_results_for_report: int = 15 
 
     # --- API keys ---
     openai_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
     langchain_api_key: Optional[str] = None
 
-    # Optional project name (not required)
-    langchain_project: str = "deep-research-agent"
+    # Optional project name for observability (not required)
+    langchain_project: str = "pr-enchanted-butter-18"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -43,4 +44,5 @@ class AgentConfig(BaseSettings):
         """
         if self.langchain_api_key and self.langchain_api_key.strip():
             os.environ["LANGCHAIN_API_KEY"] = self.langchain_api_key
+            os.environ["LANGCHAIN_TRACING_V2"] = "True"
             os.environ["LANGCHAIN_PROJECT"] = self.langchain_project

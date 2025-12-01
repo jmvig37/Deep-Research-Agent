@@ -1,16 +1,24 @@
-from typing import TypedDict, Annotated, Sequence, Dict, Any, List, Optional
+from typing import TypedDict, Annotated, Dict, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langsmith import traceable
 from operator import add
-from datetime import datetime
 import re
 import numpy as np
 
-from models import SearchQueries, RefinementDecision
+from models import SearchQueries, RefinementDecision, ResearchResult, SearchResult
 from tools.searchtool import create_tavily_search_tool
+from util import (
+    process_search_result,
+    sort_by_relevance,
+    select_top_results,
+    format_sources_section,
+    extract_cited_sources,
+    filter_sources_by_citations,
+    has_sources_section,
+)
 
 from config import AgentConfig
 from prompts import (
@@ -35,8 +43,7 @@ class AgentState(TypedDict):
     report: str                         # final synthesized report text
 
     # Search state
-    search_results: List[Dict[str, Any]]  # accumulated + deduped results
-    search_time_range: Optional[str]      # current time range hint ("day"/"week"/...)
+    search_results: List[SearchResult]    # accumulated + deduped results
 
     # Refinement loop state
     refinement_iterations: int           # how many refinement passes we've done
@@ -71,15 +78,13 @@ class DeepResearchAgent:
         # Embedding cache for query strings
         self.embedding_cache: Dict[str, List[float]] = {}
         
-        # Initialize tools
+        # Initialize tool
         self.tavily_search_tool = create_tavily_search_tool(
             tavily_api_key=config.tavily_api_key,
             max_results=config.max_results_per_search,
-            time_range=config.search_time_range
+            time_range=None
         )
         
-        # Store tools in a list for LangGraph nodes
-        self.tools: List[BaseTool] = [self.tavily_search_tool]
         # Build the graph
         self.graph = self._build_graph()
     
@@ -163,7 +168,7 @@ class DeepResearchAgent:
                 AIMessage(content=f"Error generating search queries, using fallback: {str(e)}")
             )
         
-        # Store queries in state (limit to configured number)
+        # Store queries in state
         search_queries = search_queries[:self.config.num_searches]
         state["search_queries"] = search_queries
         
@@ -172,53 +177,26 @@ class DeepResearchAgent:
         
         print(f"✓ Generated {len(search_queries)} search queries")
         
-        # Log message for monitoring
+        # Log query generation output in messages
         state["messages"].append(
-            AIMessage(content=f"Generated {len(search_queries)} search queries: {', '.join(search_queries[:3])}{'...' if len(search_queries) > 3 else ''}")
+            AIMessage(content=f"Generated {len(search_queries)} search queries: {', '.join(search_queries)}")
         )
         
         return state
     
-    def _sort_by_relevance(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        def sort_key(result: Dict[str, Any]) -> float:
-            return result.get("score", 0.0)
-        return sorted(results, key=sort_key, reverse=True)    
-
-    def _process_search_result(self, result: Dict[str, Any]) -> Dict[str, Any] | None:
-        """Process a single search result into standardized format.
-        
-        Args:
-            result: Raw search result from Tavily
-            
-        Returns:
-            Processed result dict or None if invalid
-        """
-        if not isinstance(result, dict):
-            return None
-        if not (result.get('url') or result.get('content') or result.get('raw_content')):
-            return None
-        
-        return {
-            'url': result.get('url', ''),
-            'title': result.get('title', result.get('name', '')),
-            'content': result.get('content', result.get('raw_content', result.get('snippet', ''))),
-            'score': result.get('score', 0.0),
-            'published_date': result.get('published_date')
-        }
     
-    def _execute_single_search(self, query: str, original_query: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _execute_single_search(self, query: str) -> List[SearchResult]:
         """Execute a single search query and return processed results.
         
         Args:
             query: Search query string
-            original_query: Original user query (for extracting time range context)
             
         Returns:
             List of processed search results
         """
         try:
             # Use the tool to execute search
-            results_list = self.tavily_search_tool.invoke({"query": query})
+            results_list = self.tavily_search_tool.invoke(query)
             
             if not results_list:
                 return []
@@ -237,16 +215,21 @@ class DeepResearchAgent:
                 # Skip error dicts (format: {"error": True, "message": "..."})
                 if isinstance(r, dict) and r.get("error") is True:
                     continue
-                processed = self._process_search_result(r)
+                processed = process_search_result(r)
                 if processed:
                     processed_results.append(processed)
             
+            if not processed_results:
+                return []
+            
             # Sort by relevance
-            return self._sort_by_relevance(processed_results)
+            return sort_by_relevance(processed_results)
             
         except Exception as e:
             # Log error but don't fail the entire search
             print(f"  ⚠️  Search execution error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
     
     @traceable(name="execute_searches")
@@ -270,15 +253,15 @@ class DeepResearchAgent:
 
         # Get existing results to merge with (for refinement loops)
         existing_results = state.get("search_results", [])
-        existing_urls = {r.get("url", "") for r in existing_results if isinstance(r, dict)}
+        existing_urls = {r.url for r in existing_results}
 
         # Track queries in all_queries for deduplication/debug
         state["all_queries"].extend(search_queries)
 
         # Execute all searches and collect raw results from this iteration
-        all_results: List[Dict[str, Any]] = []
+        all_results: List[SearchResult] = []
         for i, query in enumerate(search_queries, 1):
-            print(f"  [{i}/{len(search_queries)}] Searching: {query[:60]}{'...' if len(query) > 60 else ''}")
+            print(f"  [{i}/{len(search_queries)}] Searching: {query[:60]}{'...' if len(query) > 100 else ''}")
             query_results = self._execute_single_search(query)
 
             if query_results:
@@ -296,19 +279,18 @@ class DeepResearchAgent:
         # Merge new results with existing results, avoiding duplicates by URL
         previous_total = len(existing_results)
         if all_results:
-            # Sort raw results by relevance before merging
-            all_results = self._sort_by_relevance(all_results)
+            # Sort raw results by relevance before merging (all_results are SearchResult models)
+            all_results = sort_by_relevance(all_results)
 
             for result in all_results:
-                if isinstance(result, dict):
-                    url = result.get("url", "")
-                    if url and url not in existing_urls:
-                        existing_results.append(result)
-                        existing_urls.add(url)
+                url = result.url
+                if url and url not in existing_urls:
+                    existing_results.append(result)
+                    existing_urls.add(url)
 
         # Sort final results by relevance
         if existing_results:
-            existing_results = self._sort_by_relevance(existing_results)
+            existing_results = sort_by_relevance(existing_results)
 
         if not existing_results:
             # No results at all – warn and keep state consistent
@@ -324,7 +306,6 @@ class DeepResearchAgent:
         else:
             new_total = len(existing_results)
             deduplicated_count = new_total - previous_total
-            raw_count = len(all_results)
             total_count = new_total
 
             if deduplicated_count > 0:
@@ -420,41 +401,6 @@ class DeepResearchAgent:
             print(f"  ⚠️  Embedding deduplication failed: {str(e)}, keeping all queries")
             return new_queries
     
-    def _create_result_summaries(self, search_results: List[Dict[str, Any]]) -> List[str]:
-        """Create concise summaries from search results for refinement analysis.
-        
-        Args:
-            search_results: List of search result dictionaries
-            
-        Returns:
-            List of formatted summary strings
-        """
-        if not search_results:
-            return []
-        
-        # Limit the number of results to summarize to avoid token explosion
-        results_to_summarize = search_results[:15]  # Limit to top 15 results
-        
-        summaries = []
-        for i, result in enumerate(results_to_summarize, 1):
-            if isinstance(result, dict):
-                title = result.get('title', 'N/A')
-                content = result.get('content', result.get('snippet', ''))
-                
-                # Truncate content to a reasonable length for summary
-                if isinstance(content, str):
-                    content_summary = content[:300] + "..." if len(content) > 300 else content
-                else:
-                    content_summary = str(content)[:300] if content else 'N/A'
-                
-                summaries.append(f"Result {i}: {title} - {content_summary}")
-        
-        # If we have more results, add a note
-        if len(search_results) > len(results_to_summarize):
-            summaries.append(f"Result {len(summaries) + 1}: ... and {len(search_results) - len(results_to_summarize)} more results")
-        
-        return summaries
-    
     @traceable(name="refine_searches")
     def _refine_searches(self, state: AgentState) -> AgentState:
         """Analyze search results and generate refined search queries to fill gaps."""
@@ -488,9 +434,21 @@ class DeepResearchAgent:
             state["should_continue_research"] = False
             return state
         
-        # Create summaries from search results for analysis
-        summaries = self._create_result_summaries(search_results)
-        results_text = "\n".join(summaries) if summaries else "No results available."
+        # Format search results for analysis
+        # Limit the number of results to avoid overwhelming context
+        results_to_analyze = search_results[:self.config.max_results_for_report]
+        results_text_parts = []
+        for i, result in enumerate(results_to_analyze, 1):
+            title = result.title
+            content = result.content
+            # Truncate content to a reasonable length
+            content_summary = content[:300] + "..." if len(content) > 300 else content
+            results_text_parts.append(f"Result {i}: {title} - {content_summary}")
+        
+        if len(search_results) > len(results_to_analyze):
+            results_text_parts.append(f"... and {len(search_results) - len(results_to_analyze)} more results")
+        
+        results_text = "\n".join(results_text_parts) if results_text_parts else "No results available."
         
         # Get previous queries for context and deduplication
         previous_queries = state.get("all_queries", [])
@@ -502,10 +460,9 @@ class DeepResearchAgent:
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)
-        ]
-        
+        ]             
+
         try:
-            # Use structured output (no tools needed for refinement analysis)
             structured_llm = self.llm.with_structured_output(RefinementDecision)
             result = structured_llm.invoke(messages)
             should_continue = result.should_continue
@@ -524,6 +481,7 @@ class DeepResearchAgent:
             reason = "Error in refinement analysis"
             time_range = None
         
+
         # Check if we can actually continue (haven't hit max iterations)
         can_continue = refinement_iterations < self.config.num_refinement_iterations
         
@@ -536,7 +494,7 @@ class DeepResearchAgent:
             
             if original_count > len(refined_queries):
                 filtered_count = original_count - len(refined_queries)
-                print(f"  Filtered out {filtered_count} duplicate query{'s' if filtered_count > 1 else ''}")
+                print(f"  Filtered out {filtered_count} duplicate querie{'s' if filtered_count > 1 else ''}")
             
             if not refined_queries:
                 # All queries were duplicates, no point continuing
@@ -557,9 +515,8 @@ class DeepResearchAgent:
                     print(f"  ⚠️  Invalid time_range '{time_range}', ignoring")
                     time_range = None
             
-            # Update time_range in state (None means all time)
+            # Update time_range if specified (None means all time)
             if time_range is not None:
-                state["search_time_range"] = time_range
                 # Recreate the search tool with the new time_range
                 self.tavily_search_tool = create_tavily_search_tool(
                     tavily_api_key=self.config.tavily_api_key,
@@ -596,141 +553,36 @@ class DeepResearchAgent:
         
         return state
     
-    def _format_result_for_prompt(self, result: Dict[str, Any], index: int) -> str:
-        """Format a single search result for inclusion in the prompt.
+    def _summarize_result_for_prompt(self, result: SearchResult) -> str:
+        """Summarize a search result using LLM for inclusion in the prompt.
         
         Args:
-            result: Search result dictionary
-            index: Source index number
+            result: SearchResult model
             
         Returns:
-            Formatted string for the prompt
+            Summarized content string
         """
-        if isinstance(result, str):
-            return f"Source {index}:\nContent: {result[:500]}{'...' if len(result) > 500 else ''}\n"
-        elif isinstance(result, dict):
-            title = result.get('title', 'N/A')
-            url = result.get('url', 'N/A')
-            content = result.get('content', result.get('snippet', result.get('text', 'N/A')))
-            if isinstance(content, str) and len(content) > 800:
-                content = content[:800] + "..."
-            return f"[Source {index}] URL: {url}\nTitle: {title}\nContent: {content}\n"
-        else:
-            return f"Source {index}:\nContent: {str(result)[:500]}{'...' if len(str(result)) > 500 else ''}\n"
-    
-    def _format_sources_section(self, results: List[Dict[str, Any]], preserve_original_indices: bool = False) -> str:
-        """Format sources section for the prompt.
+        # If content is short enough, return as-is
+        if len(result.content) <= 800:
+            return result.content
         
-        Args:
-            results: List of search result dictionaries
-            preserve_original_indices: If True, use original_index from results instead of renumbering
+        # Use LLM to summarize longer content
+        try:
+            summary_prompt = f"""Summarize the following content in a concise way (aim for ~500-800 characters) while preserving key facts and information:
+                Title: {result.title}
+                URL: {result.url}
+                Content: {result.content}"""
+                
+            messages = [
+                SystemMessage(content="You are a helpful assistant that summarizes content concisely while preserving key information."),
+                HumanMessage(content=summary_prompt)
+            ]
             
-        Returns:
-            Formatted sources section string
-        """
-        source_urls = []
-        for i, result in enumerate(results, 1):
-            if isinstance(result, dict):
-                url = result.get('url', 'N/A')
-                title = result.get('title', 'N/A')
-                if url != 'N/A' and url:
-                    # Use original_index if preserving indices, otherwise use position
-                    if preserve_original_indices and 'original_index' in result:
-                        source_num = result['original_index']
-                    else:
-                        source_num = i
-                    source_urls.append(f"{source_num}. {title}\n   URL: {url}")
-        return "\n\n".join(source_urls) if source_urls else "No sources available."
-    
-    def _extract_cited_sources(self, report: str) -> set[int]:
-        """Extract source numbers that are actually cited in the report body.
-        
-        Args:
-            report: Generated report text
-            
-        Returns:
-            Set of source numbers (1-indexed) that are cited in the report
-        """
-        # Find all citations like [Source 1], [Source 2], etc.
-        # Also handle variations like Source 1, Source 2 (without brackets)
-        cited_sources = set()
-        
-        # Pattern for [Source N] or [Source N] (most common format)
-        bracket_pattern = r'\[Source\s+(\d+)\]'
-        # Pattern for Source N (without brackets, but in context)
-        text_pattern = r'(?:^|\s)Source\s+(\d+)(?:\s|$|,|\.)'
-        
-        # Find all matches
-        for match in re.finditer(bracket_pattern, report, re.IGNORECASE):
-            cited_sources.add(int(match.group(1)))
-        
-        for match in re.finditer(text_pattern, report, re.IGNORECASE):
-            cited_sources.add(int(match.group(1)))
-        
-        return cited_sources
-    
-    def _filter_sources_by_citations(
-        self, 
-        results: List[Dict[str, Any]], 
-        cited_sources: set[int]
-    ) -> List[Dict[str, Any]]:
-        """Filter results to only include sources that were cited in the report.
-        Preserves original source indices.
-        
-        Args:
-            results: All search results (1-indexed by position, with original_index preserved)
-            cited_sources: Set of source numbers that were cited
-            
-        Returns:
-            Filtered list of results that were actually cited, with original_index preserved
-        """
-        if not cited_sources:
-            return results  # If no citations found, return all (fallback)
-        
-        # Filter to only include cited sources (1-indexed)
-        # Preserve original_index if it exists, otherwise use position
-        filtered = []
-        for i, result in enumerate(results, 1):
-            if i in cited_sources:
-                # Ensure original_index is preserved
-                if isinstance(result, dict):
-                    result_copy = result.copy()
-                    # Preserve original_index if it exists, otherwise set it to current index
-                    if 'original_index' not in result_copy:
-                        result_copy['original_index'] = i
-                    filtered.append(result_copy)
-                else:
-                    filtered.append(result)
-        
-        return filtered
-    
-    def _has_sources_section(self, report: str) -> bool:
-        """Check if report already contains a sources section.
-        
-        Args:
-            report: Generated report text
-            
-        Returns:
-            True if sources section exists, False otherwise
-        """
-        report_lower = report.lower()
-        return (
-            "## sources" in report_lower or
-            "# sources" in report_lower or
-            "sources section" in report_lower or
-            "sources:" in report_lower or
-            "## references" in report_lower or
-            "# references" in report_lower or
-            "references:" in report_lower or
-            "sources list" in report_lower or
-            "list of sources" in report_lower
-        )
-    
-    def _select_top_results(self, search_results: List[Dict[str, Any]], limit: int = 15) -> List[Dict[str, Any]]:
-        # Either just use the first N (Tavily is already sorted),
-        # or re-sort by score only:
-        sorted_results = self._sort_by_relevance(search_results)
-        return sorted_results[:limit]
+            response = self.llm.invoke(messages)
+            return response.content.strip()
+        except Exception as e:
+            # Simple truncation if LLM call fails
+            return result.content[:800] + "..."
 
     @traceable(name="generate_report")
     def _generate_report(self, state: AgentState) -> AgentState:
@@ -748,26 +600,25 @@ class DeepResearchAgent:
             state["report"] = error_report
             return state
         
-        # Select top 15 most relevant results
-        top_results = self._select_top_results(search_results, limit=15)
+        # Select top results for report generation
+        top_results = select_top_results(search_results, limit=self.config.max_results_for_report)
         
         # Store original indices in results for later reference
         for i, result in enumerate(top_results, 1):
-            if isinstance(result, dict):
-                result['original_index'] = i
+            result.original_index = i
         
-        # Format results for prompt
-        formatted_results = [
-            self._format_result_for_prompt(result, i + 1)
-            for i, result in enumerate(top_results)
-        ]
+        # Format results for prompt with LLM summarization
+        formatted_results = []
+        for i, result in enumerate(top_results, 1):
+            summary = self._summarize_result_for_prompt(result)
+            formatted_results.append(f"[Source {i}] URL: {result.url}\nTitle: {result.title}\nContent: {summary}\n")
         results_text = "\n\n".join(formatted_results) if formatted_results else "No search results available."
         
-        # Format sources section (initial numbering 1-15)
-        sources_section = self._format_sources_section(top_results)
+        # Format sources section (initial numbering based on max_results_for_report)
+        sources_section = format_sources_section(top_results)
         
-        # Generate report (no tools needed - searches already done)
-        prompt = ReportGenerationPrompt(self.config.max_report_length)
+        # Generate report
+        prompt = ReportGenerationPrompt(self.config.max_report_length_words)
         messages = [
             SystemMessage(content=prompt.get_system_prompt()),
             HumanMessage(content=prompt.get_user_prompt(query, results_text, sources_section))
@@ -777,19 +628,19 @@ class DeepResearchAgent:
         report = response.content
         
         # Extract which sources were actually cited in the report body
-        cited_sources = self._extract_cited_sources(report)
+        cited_sources = extract_cited_sources(report)
         
         # Filter results to only include cited sources, preserving original indices
         if cited_sources:
-            cited_results = self._filter_sources_by_citations(top_results, cited_sources)
+            cited_results = filter_sources_by_citations(top_results, cited_sources)
             # Re-format sources section with only cited sources, preserving original indices
-            filtered_sources_section = self._format_sources_section(cited_results, preserve_original_indices=True)
+            filtered_sources_section = format_sources_section(cited_results, preserve_original_indices=True)
         else:
             # If no citations found, use all sources (fallback - shouldn't happen if LLM follows instructions)
             filtered_sources_section = sources_section
         
         # Replace or add the sources section with filtered version
-        if self._has_sources_section(report):
+        if has_sources_section(report):
             # Replace existing sources section with filtered one
             # Match from ## Sources or # Sources to end of document or next ## heading
             sources_pattern = r'(##\s+Sources?[^\#]*(?=\n##|\Z))'
@@ -813,8 +664,8 @@ class DeepResearchAgent:
         return state
     
     @traceable(name="research")
-    def research(self, query: str) -> dict:
-        """Execute a research query and return the results."""
+    def research(self, query: str) -> ResearchResult:
+        """High-level entry point: runs the LangGraph and returns query/report/sources for external callers."""
         print(f"\n{'='*80}")
         print(f"🔬 Starting research for: {query}")
         print(f"{'='*80}\n")
@@ -830,8 +681,7 @@ class DeepResearchAgent:
             "report": "",
             "refinement_iterations": 0,
             "should_continue_research": False,
-            "all_queries": [],  # Track all queries for deduplication
-            "search_time_range": self.config.search_time_range  # Initial time range from config
+            "all_queries": []
         }
         
         # Run the graph
@@ -841,9 +691,11 @@ class DeepResearchAgent:
         print("✅ Research completed!")
         print(f"{'='*80}\n")
         
-        return {
-            "query": query,
-            "report": final_state["report"],
-            "messages": final_state["messages"],
-            "sources": final_state.get("search_results", [])
-        }
+        search_results = final_state.get("search_results", [])
+        
+        return ResearchResult(
+            query=query,
+            report=final_state["report"],
+            messages=final_state["messages"],
+            sources=search_results
+        )

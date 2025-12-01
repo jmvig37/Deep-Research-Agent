@@ -1,0 +1,13 @@
+{
+  "test_cases": [
+    {
+      "prompt": "What are the latest developments in quantum computing?",
+      "gold_response": "Quantum computing has seen significant advances in error correction, qubit stability, and practical applications. Recent developments include improved quantum error correction codes, longer coherence times for qubits, and progress toward fault-tolerant quantum systems."
+    },
+    {
+      "prompt": "Who won the 2024 World Series?",
+      "gold_response": "The Texas Rangers won the 2024 World Series, defeating the Arizona Diamondbacks in the championship series."
+    }
+  ]
+}
+

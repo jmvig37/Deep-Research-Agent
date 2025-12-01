@@ -1,6 +1,7 @@
 """Pydantic models for structured outputs."""
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
+from langchain_core.messages import BaseMessage
 from config import AgentConfig
 
 class SearchQueries(BaseModel):
@@ -39,4 +40,12 @@ class SearchResult(BaseModel):
     content: str
     score: float = 0.0
     published_date: Optional[str] = None
+    original_index: Optional[int] = None
 
+
+class ResearchResult(BaseModel):
+    """Structured result from a research query."""
+    query: str = Field(description="The original research question")
+    report: str = Field(description="The generated research report")
+    messages: List[BaseMessage] = Field(description="All messages from the research process")
+    sources: List[SearchResult] = Field(description="List of search results used in the report")
