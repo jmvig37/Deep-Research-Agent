@@ -1,0 +1,62 @@
+[
+  {
+    "prompt": "What are the latest developments in quantum computing?",
+    "report_length": 6947,
+    "num_sources": 41,
+    "has_citations": true,
+    "judge_score": 85,
+    "judge_accuracy": 90,
+    "judge_completeness": 80,
+    "judge_relevance": 90,
+    "judge_citation_quality": 85,
+    "judge_reasoning": "The agent's report provides accurate information about recent developments in quantum computing, aligning well with the gold standard. It covers key points such as advancements in logical qubits, error correction, and applications in various sectors, though it could have included more specific details on fault tolerance and qubit coherence times. The information is highly relevant to the original query, focusing on the latest trends and market growth. Sources are cited appropriately, but some could be more directly related to the specific advancements mentioned.",
+    "report": "# Research Report on Latest Developments in Quantum Computing\n\n## Executive Summary\nRecent advancements in quantum computing are poised to significantly impact various sectors, including healthcare, f...",
+    "test_case_index": 1,
+    "success": true
+  },
+  {
+    "prompt": "Provide a historical overview of the 2008 global financial crisis, including its main causes and major policy responses.",
+    "report_length": 6932,
+    "num_sources": 60,
+    "has_citations": true,
+    "judge_score": 85,
+    "judge_accuracy": 90,
+    "judge_completeness": 80,
+    "judge_relevance": 90,
+    "judge_citation_quality": 80,
+    "judge_reasoning": "The agent's report provides a largely accurate overview of the 2008 global financial crisis, aligning well with the gold standard in terms of key causes and policy responses. However, it lacks some specific details and sources that were present in the gold standard, which affects its completeness. The information is relevant to the original query, but some citations are less specific or not as robust as those in the gold standard. Overall, the report is well-structured and informative, but could benefit from more precise sourcing and additional details.",
+    "report": "# Research Report: Historical Overview of the 2008 Global Financial Crisis\n\n## Executive Summary\nThe 2008 global financial crisis, often referred to as the Great Recession, was primarily triggered by ...",
+    "test_case_index": 2,
+    "success": true
+  },
+  {
+    "prompt": "Explain the role of Taiwan in the global semiconductor supply chain, without discussing political issues.",
+    "report_length": 5350,
+    "num_sources": 57,
+    "has_citations": true,
+    "judge_score": 85,
+    "judge_accuracy": 90,
+    "judge_completeness": 80,
+    "judge_relevance": 90,
+    "judge_citation_quality": 80,
+    "judge_reasoning": "The report provides accurate information about Taiwan's role in the semiconductor supply chain, closely aligning with the gold standard. It covers key points such as manufacturing dominance, economic impact, and global dependency, but could improve by explicitly mentioning the advanced fabrication and supply chain integration aspects highlighted in the gold standard. The citations are relevant but could be more consistently formatted and detailed.",
+    "report": "# Research Report: The Role of Taiwan in the Global Semiconductor Supply Chain\n\n## Executive Summary\nTaiwan plays a critical role in the global semiconductor supply chain, dominating the manufacturing...",
+    "test_case_index": 3,
+    "success": true
+  },
+  {
+    "prompt": "Compare the business models of ride-hailing platforms and traditional taxi companies.",
+    "report_length": 8546,
+    "num_sources": 66,
+    "has_citations": true,
+    "judge_score": 85,
+    "judge_accuracy": 90,
+    "judge_completeness": 80,
+    "judge_relevance": 90,
+    "judge_citation_quality": 80,
+    "judge_reasoning": "The agent's report provides a thorough comparison of ride-hailing platforms and traditional taxi companies, accurately reflecting the key differences in business models, pricing strategies, and technology utilization. However, while it covers many important points, it could benefit from a more concise focus on the most critical aspects outlined in the gold standard. The citations are relevant but could be more consistently formatted and directly linked to specific claims made in the text.",
+    "report": "# Research Report: Comparison of Business Models of Ride-Hailing Platforms and Traditional Taxi Companies\n\n## Executive Summary\nThe business models of ride-hailing platforms and traditional taxi compa...",
+    "test_case_index": 4,
+    "success": true
+  }
+]
