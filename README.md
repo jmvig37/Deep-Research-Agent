@@ -285,22 +285,6 @@ All nodes read from and write to shared state, enabling data persistence across 
 
 The project includes an evaluation system using an LLM judge to assess report quality against gold standard responses.
 
-### Setup
-
-1. Create a test cases JSON file (see `eval/test_cases.example.json` for format):
-```json
-{
-  "test_cases": [
-    {
-      "prompt": "Your research question here",
-      "gold_response": "Expected response text"
-    }
-  ]
-}
-```
-
-2. Place your test cases file in the `eval/` directory or provide the path when running.
-
 ### Running Evaluations
 
 From the project root:
